@@ -16,3 +16,4 @@ images/rootfs/
 .cargo/
 .rustup/
 .crosvm-cache/
+third_party/crosvm/
