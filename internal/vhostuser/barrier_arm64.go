@@ -1,0 +1,3 @@
+package vhostuser
+
+func memoryBarrier()

@@ -1,0 +1,80 @@
+server_url: https://localhost:18443
+listen_addr: 127.0.0.1:18443
+metrics_listen_addr: 127.0.0.1:19090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+trusted_proxies: []
+
+noise:
+  private_key_path: /home/thinxer/Projects/ttt/run/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+derp:
+  server:
+    enabled: true
+    region_id: 999
+    region_code: "workspace"
+    region_name: "Workspace DERP"
+    verify_clients: true
+    stun_listen_addr: "0.0.0.0:13478"
+    private_key_path: /home/thinxer/Projects/ttt/run/headscale/derp_server_private.key
+    automatically_add_embedded_derp_region: true
+    ipv4: 127.0.0.1
+    ipv6: "::1"
+  urls: []
+  paths: []
+  auto_update_enabled: false
+  update_frequency: 3h
+
+disable_check_updates: true
+
+database:
+  type: sqlite
+  debug: false
+  gorm:
+    prepare_stmt: true
+    parameterized_queries: true
+    skip_err_record_not_found: true
+    slow_threshold: 1000
+  sqlite:
+    path: /home/thinxer/Projects/ttt/run/headscale/db.sqlite
+    write_ahead_log: true
+    wal_autocheckpoint: 1000
+
+acme_url: https://acme-v02.api.letsencrypt.org/directory
+acme_email: ""
+tls_letsencrypt_hostname: ""
+tls_letsencrypt_cache_dir: /home/thinxer/Projects/ttt/run/headscale/acme
+tls_letsencrypt_challenge_type: HTTP-01
+tls_letsencrypt_listen: ""
+tls_cert_path: /home/thinxer/Projects/ttt/run/headscale/tls.crt
+tls_key_path: /home/thinxer/Projects/ttt/run/headscale/tls.key
+
+log:
+  level: info
+  format: text
+
+policy:
+  mode: file
+  path: ""
+
+dns:
+  magic_dns: true
+  base_domain: vm.lab.internal
+  override_local_dns: true
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 2606:4700:4700::1111
+    split: {}
+  search_domains: []
+  extra_records: []
+
+unix_socket: /home/thinxer/Projects/ttt/run/headscale/headscale.sock
+unix_socket_permission: "0700"
+logtail:
+  enabled: false

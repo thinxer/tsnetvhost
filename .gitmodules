@@ -1,0 +1,3 @@
+[submodule "third_party/crosvm"]
+	path = third_party/crosvm
+	url = https://chromium.googlesource.com/crosvm/crosvm
