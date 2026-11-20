@@ -259,14 +259,14 @@ func (f *testFrontend) readCallCount(fd int) uint64 {
 func startTestEndpoint(t testing.TB) (*Endpoint, string, context.CancelFunc) {
 	t.Helper()
 	sockPath := filepath.Join(t.TempDir(), "vhost.sock")
-	ep, err := NewEndpoint(func() []byte { return make([]byte, 12) })
+	ep, err := NewEndpoint()
 	if err != nil {
 		t.Fatalf("NewEndpoint: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	listening := make(chan struct{})
 	go func() {
-		_ = ep.Serve(ctx, sockPath, Hooks{
+		_ = ep.Serve(ctx, sockPath, func() []byte { return make([]byte, 12) }, Hooks{
 			OnListening: func() { close(listening) },
 		})
 	}()

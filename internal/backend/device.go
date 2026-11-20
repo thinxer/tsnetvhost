@@ -1,7 +1,9 @@
 package backend
 
 import (
+	"crypto/sha256"
 	"io"
+	"net/netip"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -20,24 +22,50 @@ type Transport interface {
 	Close() error
 }
 
+type addrState struct {
+	has4 bool
+	ipv4 [4]byte
+	has6 bool
+	ipv6 [16]byte
+}
+
 // Device implements wireguard-go's tun.Device directly over a vhost-user
-// Transport without intermediate packet channels or goroutines.
+// Transport, handling Ethernet framing, source/destination IP validation,
+// and synthetic-gateway ARP/NDP without intermediate channels or goroutines.
 type Device struct {
-	adapter   *Adapter
 	transport Transport
+	guestMAC  [6]byte
+	mtu       int
+	addrs     atomic.Pointer[addrState]
 	events    chan tun.Event
 	closeOnce sync.Once
 	closed    atomic.Bool
-	mtu       int
 }
 
-func NewDevice(adapter *Adapter, transport Transport, mtu int) *Device {
-	return &Device{
-		adapter:   adapter,
+func NewDevice(hostname string, mtu int, transport Transport) *Device {
+	digest := sha256.Sum256([]byte(hostname))
+	d := &Device{
 		transport: transport,
-		events:    make(chan tun.Event, 1),
+		guestMAC:  [6]byte{0x02, 0x54, 0x53, digest[0], digest[1], digest[2]},
 		mtu:       mtu,
+		events:    make(chan tun.Event, 1),
 	}
+	d.addrs.Store(&addrState{})
+	return d
+}
+
+func (d *Device) SetAddresses(ipv4, ipv6 netip.Addr) {
+	st := &addrState{
+		has4: ipv4.IsValid(),
+		has6: ipv6.IsValid(),
+	}
+	if st.has4 {
+		st.ipv4 = ipv4.As4()
+	}
+	if st.has6 {
+		st.ipv6 = ipv6.As16()
+	}
+	d.addrs.Store(st)
 }
 
 func (d *Device) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
@@ -56,7 +84,7 @@ func (d *Device) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
 			if count >= len(packets) || offset >= maxEnd {
 				return vhostuser.TXStop, nil
 			}
-			n, reply, fit := d.adapter.DecodeGuestFrame(frame, slab[offset:maxEnd])
+			n, reply, fit := d.decodeGuestFrame(frame, slab[offset:maxEnd])
 			if !fit {
 				if count == 0 {
 					shortBuf = true
@@ -88,11 +116,11 @@ func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
 			return i, io.ErrUnexpectedEOF
 		}
 	}
-	addrs := d.adapter.loadAddresses()
+	addrs := d.addrs.Load()
 	d.transport.WriteRX(len(bufs), func(i int) ([14]byte, []byte, bool) {
 		packet := bufs[i][offset:]
 		debugPacket("tsnet-write", packet)
-		return d.adapter.FrameInbound(packet, addrs)
+		return d.frameInbound(packet, addrs)
 	})
 	return len(bufs), nil
 }

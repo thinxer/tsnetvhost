@@ -1,11 +1,9 @@
 package backend
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"net/netip"
-	"sync/atomic"
 )
 
 const (
@@ -20,48 +18,7 @@ var syntheticIPv4Bytes = syntheticIPv4.As4()
 var syntheticIPv6Bytes = syntheticIPv6.As16()
 var gatewayMAC = [6]byte{0x02, 0x54, 0x53, 0xff, 0xfe, 0x01}
 
-type addrState struct {
-	has4 bool
-	ipv4 [4]byte
-	has6 bool
-	ipv6 [16]byte
-}
-
-type Adapter struct {
-	guestMAC [6]byte
-	mtu      int
-	addrs    atomic.Pointer[addrState]
-}
-
-func NewAdapter(hostname string, mtu int) *Adapter {
-	digest := sha256.Sum256([]byte(hostname))
-	mac := [6]byte{0x02, 0x54, 0x53, digest[0], digest[1], digest[2]}
-	a := &Adapter{guestMAC: mac, mtu: mtu}
-	a.addrs.Store(&addrState{})
-	return a
-}
-
-func (a *Adapter) SetAddresses(ipv4, ipv6 netip.Addr) {
-	st := &addrState{
-		has4: ipv4.IsValid(),
-		has6: ipv6.IsValid(),
-	}
-	if st.has4 {
-		st.ipv4 = ipv4.As4()
-	}
-	if st.has6 {
-		st.ipv6 = ipv6.As16()
-	}
-	a.addrs.Store(st)
-}
-
-func (a *Adapter) loadAddresses() *addrState {
-	return a.addrs.Load()
-}
-
-// FrameInbound validates an inbound IP packet against the node's assigned
-// addresses and builds the Ethernet header to deliver it to the guest.
-func (a *Adapter) FrameInbound(packet []byte, st *addrState) (ethHdr [14]byte, payload []byte, ok bool) {
+func (d *Device) frameInbound(packet []byte, st *addrState) (ethHdr [14]byte, payload []byte, ok bool) {
 	if st == nil || len(packet) == 0 {
 		return ethHdr, nil, false
 	}
@@ -80,26 +37,22 @@ func (a *Adapter) FrameInbound(packet []byte, st *addrState) (ethHdr [14]byte, p
 	default:
 		return ethHdr, nil, false
 	}
-	copy(ethHdr[0:6], a.guestMAC[:])
+	copy(ethHdr[0:6], d.guestMAC[:])
 	copy(ethHdr[6:12], gatewayMAC[:])
 	binary.BigEndian.PutUint16(ethHdr[12:14], etherType)
 	return ethHdr, packet, true
 }
 
-// DecodeGuestFrame inspects an outbound Ethernet frame from the guest.
-// For valid IPv4/IPv6 packets, it copies the IP payload directly into dst and
-// returns (len(packet), nil, true). If dst is too small, it returns (0, nil, false).
-// For synthetic-gateway ARP/NDP requests, it returns (0, replyFrame, true).
-func (a *Adapter) DecodeGuestFrame(frame []byte, dst []byte) (n int, reply []byte, fit bool) {
+func (d *Device) decodeGuestFrame(frame []byte, dst []byte) (n int, reply []byte, fit bool) {
 	if len(frame) < 14 {
 		return 0, nil, true
 	}
 	debugPacket("guest-tx", frame)
 	switch binary.BigEndian.Uint16(frame[12:14]) {
 	case etherTypeARP:
-		return 0, a.handleARP(frame), true
+		return 0, d.handleARP(frame), true
 	case etherTypeIPv6:
-		if reply, handled := a.handleNDP(frame); handled {
+		if reply, handled := d.handleNDP(frame); handled {
 			return 0, reply, true
 		}
 	case etherTypeIPv4:
@@ -110,7 +63,7 @@ func (a *Adapter) DecodeGuestFrame(frame []byte, dst []byte) (n int, reply []byt
 	if len(packet) == 0 {
 		return 0, nil, true
 	}
-	st := a.addrs.Load()
+	st := d.addrs.Load()
 	switch packet[0] >> 4 {
 	case 4:
 		if len(packet) < 20 || !st.has4 || [4]byte(packet[12:16]) != st.ipv4 {
@@ -131,18 +84,18 @@ func (a *Adapter) DecodeGuestFrame(frame []byte, dst []byte) (n int, reply []byt
 	return len(packet), nil, true
 }
 
-func (a *Adapter) handleARP(frame []byte) []byte {
+func (d *Device) handleARP(frame []byte) []byte {
 	if len(frame) < 42 || binary.BigEndian.Uint16(frame[14:16]) != 1 ||
 		binary.BigEndian.Uint16(frame[16:18]) != 0x0800 || frame[18] != 6 || frame[19] != 4 ||
 		binary.BigEndian.Uint16(frame[20:22]) != 1 {
 		return nil
 	}
-	st := a.addrs.Load()
+	st := d.addrs.Load()
 	if !st.has4 || [4]byte(frame[38:42]) != syntheticIPv4Bytes {
 		return nil
 	}
 	reply := make([]byte, 42)
-	copy(reply[0:6], a.guestMAC[:])
+	copy(reply[0:6], d.guestMAC[:])
 	copy(reply[6:12], gatewayMAC[:])
 	binary.BigEndian.PutUint16(reply[12:14], etherTypeARP)
 	copy(reply[14:22], frame[14:22])
@@ -154,7 +107,7 @@ func (a *Adapter) handleARP(frame []byte) []byte {
 	return reply
 }
 
-func (a *Adapter) handleNDP(frame []byte) ([]byte, bool) {
+func (d *Device) handleNDP(frame []byte) ([]byte, bool) {
 	if len(frame) < 78 || frame[14]>>4 != 6 || frame[20] != 58 || frame[54] != 135 || frame[55] != 0 {
 		return nil, false
 	}
@@ -162,7 +115,7 @@ func (a *Adapter) handleNDP(frame []byte) ([]byte, bool) {
 		return nil, false
 	}
 	source := [16]byte(frame[22:38])
-	st := a.addrs.Load()
+	st := d.addrs.Load()
 	var zero16 [16]byte
 	if !st.has6 || (source != zero16 && source != st.ipv6) {
 		return nil, true
@@ -188,7 +141,7 @@ func (a *Adapter) handleNDP(frame []byte) ([]byte, bool) {
 	checksum := internetChecksum(append(ndpPseudoHeader(packet), packet[40:]...))
 	binary.BigEndian.PutUint16(packet[42:44], checksum)
 	response := make([]byte, 14+len(packet))
-	copy(response[0:6], a.guestMAC[:])
+	copy(response[0:6], d.guestMAC[:])
 	copy(response[6:12], gatewayMAC[:])
 	binary.BigEndian.PutUint16(response[12:14], etherTypeIPv6)
 	copy(response[14:], packet)
@@ -218,15 +171,15 @@ func internetChecksum(data []byte) uint16 {
 	return ^uint16(sum)
 }
 
-func (a *Adapter) Config() []byte {
+func (d *Device) Config() []byte {
 	config := make([]byte, 12)
-	copy(config[0:6], a.guestMAC[:])
+	copy(config[0:6], d.guestMAC[:])
 	binary.LittleEndian.PutUint16(config[6:8], 1)
 	binary.LittleEndian.PutUint16(config[8:10], 1)
-	binary.LittleEndian.PutUint16(config[10:12], uint16(a.mtu))
+	binary.LittleEndian.PutUint16(config[10:12], uint16(d.mtu))
 	return config
 }
 
-func (a *Adapter) MACString() string {
-	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", a.guestMAC[0], a.guestMAC[1], a.guestMAC[2], a.guestMAC[3], a.guestMAC[4], a.guestMAC[5])
+func (d *Device) MACString() string {
+	return fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", d.guestMAC[0], d.guestMAC[1], d.guestMAC[2], d.guestMAC[3], d.guestMAC[4], d.guestMAC[5])
 }

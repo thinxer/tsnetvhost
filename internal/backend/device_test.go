@@ -86,10 +86,9 @@ func TestDeviceBatchReadWriteAndARP(t *testing.T) {
 	ipv6 := netip.MustParseAddr("fd7a:115c:a1e0::1")
 	peer4 := netip.MustParseAddr("100.64.0.2")
 
-	adapter := NewAdapter("vm1", DefaultMTU)
-	adapter.SetAddresses(ipv4, ipv6)
 	tr := &fakeTransport{}
-	dev := NewDevice(adapter, tr, DefaultMTU)
+	dev := NewDevice("vm1", DefaultMTU, tr)
+	dev.SetAddresses(ipv4, ipv6)
 
 	if dev.BatchSize() != conn.IdealBatchSize {
 		t.Fatalf("BatchSize() = %d, want %d", dev.BatchSize(), conn.IdealBatchSize)
@@ -100,7 +99,7 @@ func TestDeviceBatchReadWriteAndARP(t *testing.T) {
 	valid2 := makeIPv4Frame(ipv4, peer4, 200)
 	valid3 := makeIPv4Frame(ipv4, peer4, 300)
 	spoofed := makeIPv4Frame(peer4, ipv4, 50)
-	arpReq := makeARPRequest(adapter.guestMAC, ipv4, syntheticIPv4)
+	arpReq := makeARPRequest(dev.guestMAC, ipv4, syntheticIPv4)
 	tr.txFrames = [][]byte{arpReq, spoofed, valid1, valid2, valid3}
 
 	slab := make([]byte, 64*1024)
