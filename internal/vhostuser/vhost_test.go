@@ -328,6 +328,9 @@ func TestVhostBatchedTXAndRX(t *testing.T) {
 	if usedIdx := binary.LittleEndian.Uint16(fe.mem[fe.rxUsed+2 : fe.rxUsed+4]); usedIdx != batch {
 		t.Fatalf("RX used.idx = %d, want %d", usedIdx, batch)
 	}
+	if usedFlags := binary.LittleEndian.Uint16(fe.mem[fe.rxUsed : fe.rxUsed+2]); usedFlags&vringUsedFNoNotify == 0 {
+		t.Fatalf("RX used.flags = %#x, want VRING_USED_F_NO_NOTIFY set", usedFlags)
+	}
 	if calls := fe.readCallCount(fe.rxCallFD); calls != 1 {
 		t.Fatalf("RX callFD interrupts = %d, want 1 (batched)", calls)
 	}

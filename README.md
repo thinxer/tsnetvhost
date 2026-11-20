@@ -56,6 +56,15 @@ This is working experimental software, not a production-hardened release. The vh
 
 The current implementation targets **Linux/arm64**. Other architectures need appropriate virtqueue memory-barrier implementations and validation.
 
+### Performance notes for contributors
+
+Virtio-net checksum and segmentation offloads (`VIRTIO_NET_F_CSUM`, `GUEST_CSUM`, `HOST_TSO4/6`, `GUEST_TSO4/6`, `MRG_RXBUF`) are **intentionally omitted** rather than merely unimplemented. On Linux/arm64, batched direct virtqueue I/O (`BatchSize = 128`, pre-resolved rings, batched `used.idx`/`callFD`) already reaches ~8.9 Gbps guest-to-guest TCP over WireGuard at MTU 1280 (~870k pps), where the bottleneck sits inside `wireguard-go`/`tstun`'s single-goroutine per-packet stages rather than `vhost-user`:
+
+- **TX CSUM + TSO4/6 (`tun.GSOSplit`) regresses throughput** (~8.9 → ~6.4 Gbps): `wireguard-go/tun` lacks ARM64 assembly checksums (`checksum_generic.go`), so moving TCP checksums out of the guest kernel's ARM64-assembly `csum_partial` into Go's scalar checksum inside `RoutineReadFromTUN` bottlenecks TX and shrinks `Read()` batch sizes.
+- **RX GRO + `MRG_RXBUF` does not increase throughput** (~8.7 vs ~8.9 Gbps) despite significant added complexity, because `wireguard-go`/`tstun` per-packet processing remains the ceiling at MTU 1280.
+
+Do not re-introduce TX/RX virtio-net GSO/GRO offloads unless `wireguard-go`/`tstun` can carry GSO frames end-to-end or benchmarks show a clear net win. For higher throughput beyond ~9 Gbps, investigate larger path MTUs or `VIRTIO_NET_F_MQ` + `tun.MultiQueueDevice` for multi-stream workloads instead.
+
 ## Requirements
 
 Runtime:

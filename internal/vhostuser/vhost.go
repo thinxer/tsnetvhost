@@ -52,6 +52,7 @@ const (
 	descriptorWrite = 2
 
 	vringAvailFNoInterrupt = 1
+	vringUsedFNoNotify     = 1
 	virtioNetHdrSize       = 12
 )
 
@@ -762,6 +763,10 @@ func (s *vhostSession) resolveQueueRings(q *virtQueue) error {
 	q.descMem = descMem
 	q.availMem = availMem
 	q.usedMem = usedMem
+	if q == &s.queues[0] {
+		// Backend never polls RX kickFD; suppress guest RX kicks (VM-exits).
+		binary.LittleEndian.PutUint16(q.usedMem[0:2], vringUsedFNoNotify)
+	}
 	return nil
 }
 
