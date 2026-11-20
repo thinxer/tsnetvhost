@@ -58,8 +58,13 @@ func run() (runErr error) {
 		return err
 	}
 	backend.SetDebug(opts.logLevel == "debug")
-	device := backend.NewMemoryDevice(opts.mtu)
-	adapter := backend.NewAdapter(device, opts.name, nil)
+	adapter := backend.NewAdapter(opts.name, opts.mtu)
+	endpoint, err := vhostuser.NewEndpoint(adapter.Config)
+	if err != nil {
+		return err
+	}
+	defer endpoint.Close()
+	device := backend.NewDevice(adapter, endpoint, opts.mtu)
 	writer, err := backend.NewStatusWriter(opts.statusFile, opts.name, opts.socket, adapter.MACString(), opts.mtu)
 	if err != nil {
 		return err
@@ -116,14 +121,8 @@ func run() (runErr error) {
 	}
 	adapter.SetAddresses(ipv4, ipv6)
 	writer.SetNetwork(addressStrings(ipv4, ipv6), dns)
-	adapter.SetSendFunc(vhostuser.SendFrame)
-	inboundErrors := make(chan error, 1)
-	go func() {
-		inboundErrors <- adapter.RunInbound()
-		stop()
-	}()
 	log.Printf("%s: addresses=%s socket=%s", opts.name, strings.Join(addressStrings(ipv4, ipv6), ","), opts.socket)
-	return vhostuser.Serve(ctx, opts.socket, adapter, vhostuser.Hooks{
+	return endpoint.Serve(ctx, opts.socket, vhostuser.Hooks{
 		OnListening: func() {
 			if err := writer.Publish("ready", nil, nil); err != nil {
 				log.Printf("status update failed: %v", err)

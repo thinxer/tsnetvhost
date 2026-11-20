@@ -4,80 +4,113 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 
+	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/tun"
+	"tsnetvhost/internal/vhostuser"
 )
 
 const DefaultMTU = 1280
 
-type MemoryDevice struct {
-	outbound chan []byte
-	inbound  chan []byte
-	events   chan tun.Event
-	done     chan struct{}
-	close    sync.Once
-	mtu      int
+// Transport is the virtqueue data plane used by Device.
+type Transport interface {
+	DrainTX(handle func(frame []byte) (vhostuser.TXAction, []byte)) error
+	WriteRX(n int, get func(i int) (ethHdr [14]byte, payload []byte, ok bool))
+	Close() error
 }
 
-func NewMemoryDevice(mtu int) *MemoryDevice {
-	return &MemoryDevice{
-		outbound: make(chan []byte, 256),
-		inbound:  make(chan []byte, 256),
-		events:   make(chan tun.Event, 1),
-		done:     make(chan struct{}),
-		mtu:      mtu,
+// Device implements wireguard-go's tun.Device directly over a vhost-user
+// Transport without intermediate packet channels or goroutines.
+type Device struct {
+	adapter   *Adapter
+	transport Transport
+	events    chan tun.Event
+	closeOnce sync.Once
+	closed    atomic.Bool
+	mtu       int
+}
+
+func NewDevice(adapter *Adapter, transport Transport, mtu int) *Device {
+	return &Device{
+		adapter:   adapter,
+		transport: transport,
+		events:    make(chan tun.Event, 1),
+		mtu:       mtu,
 	}
 }
 
-func (d *MemoryDevice) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
-	if len(packets) == 0 {
+func (d *Device) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
+	if len(packets) == 0 || len(slab) < 2*tun.ReadPacketSpacing {
 		return 0, io.ErrShortBuffer
 	}
-	select {
-	case <-d.done:
-		return 0, os.ErrClosed
-	case packet := <-d.outbound:
-		if len(packet)+2*tun.ReadPacketSpacing > len(slab) {
+	maxEnd := len(slab) - tun.ReadPacketSpacing
+	for {
+		if d.closed.Load() {
+			return 0, os.ErrClosed
+		}
+		count := 0
+		offset := tun.ReadPacketSpacing
+		shortBuf := false
+		err := d.transport.DrainTX(func(frame []byte) (vhostuser.TXAction, []byte) {
+			if count >= len(packets) || offset >= maxEnd {
+				return vhostuser.TXStop, nil
+			}
+			n, reply, fit := d.adapter.DecodeGuestFrame(frame, slab[offset:maxEnd])
+			if !fit {
+				if count == 0 {
+					shortBuf = true
+				}
+				return vhostuser.TXStop, nil
+			}
+			if n > 0 {
+				packets[count] = tun.ReadPacket{Offset: offset, Size: n}
+				offset += n + tun.ReadPacketSpacing
+				count++
+			}
+			return vhostuser.TXConsume, reply
+		})
+		if shortBuf {
 			return 0, io.ErrShortBuffer
 		}
-		copy(slab[tun.ReadPacketSpacing:len(slab)-tun.ReadPacketSpacing], packet)
-		debugPacket("tsnet-read", packet)
-		packets[0] = tun.ReadPacket{Offset: tun.ReadPacketSpacing, Size: len(packet)}
-		return 1, nil
+		if count > 0 || err != nil {
+			return count, err
+		}
 	}
 }
 
-func (d *MemoryDevice) Write(bufs [][]byte, offset int) (int, error) {
-	written := 0
-	for _, buf := range bufs {
+func (d *Device) Write(bufs [][]byte, offset int) (int, error) {
+	if d.closed.Load() {
+		return 0, os.ErrClosed
+	}
+	for i, buf := range bufs {
 		if offset < 0 || offset > len(buf) {
-			return written, io.ErrUnexpectedEOF
-		}
-		packet := append([]byte(nil), buf[offset:]...)
-		debugPacket("tsnet-write", packet)
-		select {
-		case <-d.done:
-			return written, os.ErrClosed
-		case d.inbound <- packet:
-			written++
+			return i, io.ErrUnexpectedEOF
 		}
 	}
-	return written, nil
+	addrs := d.adapter.loadAddresses()
+	d.transport.WriteRX(len(bufs), func(i int) ([14]byte, []byte, bool) {
+		packet := bufs[i][offset:]
+		debugPacket("tsnet-write", packet)
+		return d.adapter.FrameInbound(packet, addrs)
+	})
+	return len(bufs), nil
 }
 
-func (d *MemoryDevice) File() *os.File { return nil }
+func (d *Device) File() *os.File { return nil }
 
-func (d *MemoryDevice) MTU() (int, error) { return d.mtu, nil }
+func (d *Device) MTU() (int, error) { return d.mtu, nil }
 
-func (d *MemoryDevice) Name() (string, error) { return "tsnet-vhost", nil }
+func (d *Device) Name() (string, error) { return "tsnet-vhost", nil }
 
-func (d *MemoryDevice) Events() <-chan tun.Event { return d.events }
+func (d *Device) Events() <-chan tun.Event { return d.events }
 
-func (d *MemoryDevice) BatchSize() int { return 1 }
+func (d *Device) BatchSize() int { return conn.IdealBatchSize }
 
-func (d *MemoryDevice) Close() error {
-	d.close.Do(func() {
-		close(d.done)
+func (d *Device) Close() error {
+	d.closeOnce.Do(func() {
+		d.closed.Store(true)
+		_ = d.transport.Close()
 		close(d.events)
 	})
 	return nil
